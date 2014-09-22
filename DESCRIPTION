@@ -1,0 +1,10 @@
+Package: CustomMicroarrayPackage
+Title: Custom microarray  analysis package
+Description: Custom functions for the custom ncRNA chip
+Version: 0.1
+Author: Simon Schafferer
+Maintainer: Simon Schafferer <simon.schafferer@i-med.ac.at>
+Depends: R (>= 3.0.2)
+License: AFL
+LazyData: true
+

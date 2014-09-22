@@ -1,0 +1,433 @@
+````{r echo=FALSE, results = 'asis'}
+    cat("<link rel='stylesheet' href='http://dl.dropboxusercontent.com/u/61211913/nv.d3.css'>")
+    cat("<link rel='stylesheet' href='http://dl.dropboxusercontent.com/u/61211913/rNVD3.css'>")
+    cat("<script src='http://code.jquery.com/jquery-1.10.1.min.js' type='text/javascript'></script>")
+    cat("<script src='http://d3js.org/d3.v3.min.js' type='text/javascript'></script>")
+    cat("<script src='http://dl.dropboxusercontent.com/u/61211913/nv.d3.min-new.js' type='text/javascript'></script>")
+    cat("<script src='http://dl.dropboxusercontent.com/u/61211913/fisheye.js' type='text/javascript'></script>")
+```
+Chip experiment
+========================================================
+Feature Selection was done with the ArrayPro Software of TECAN. 
+
+Feature Selection Parameters were chosen the following: 
+
+Every grid was inspected and (schlieren) were excluded from the data measurement. 
+Throughout all measured data following parameters were used: 
+* Raw Intensity: 
+  Whole cell
+* Background: 
+  Local Corners, Median Background
+* Net Intensity: Raw Intensity - Median background (negative ignored)
+* Normalization: None
+* Spot size was set to 20x20 pixel in the case of the secon chip
+
+The rest of the data values was chosen as proposed by the Array Pro Software. 
+For down stream analysis, the net intensity values (raw-medianBg) were used!
+```{r setOptions, message=FALSE, echo=FALSE, warning=FALSE}
+library(googleVis)
+op <- options(gvis.plot.tag='chart')
+options(stringsAsFactors=FALSE)
+library(ggplot2)
+library(reshape2)
+library(limma)
+library("geneplotter")
+library(rCharts)
+library(ggplot2)
+library(sqldf)
+library(genefilter)
+library("Biostrings")
+library("RCurl")
+library(arrayQualityMetrics)
+library("vsn")
+library("MmPalateMiRNA")
+library("latticeExtra")
+library(CustomMicroarrayPackage)
+library(Biostrings)
+```
+
+
+Declaration of Analysis Parameters
+-------------------------------------------------------------------
+```{r varDeclaration}
+#Variable Declarations for downstream analysis
+normMethod = "quantile" #VARDEFINITION
+ndups = 6 #VARDEFINITION
+spacing = 1  #VARDEFINITION
+minDetectLim = 0.15  #VARDEFINITION (minimal detection limit)
+subsetByManualControl = FALSE  #VARDEFINITION (#)filtering option)
+subsetByPMvsMM = TRUE  #VARDEFINITION (filtering option)
+orderingVar = "Name"  #VARDEFINITION 
+addInterestCand = c("900000","20285","20285_1","20285_2" )  #VARDEFINITION (additional candidates to be labeled)
+```
+
+````{r libLoad, echo=FALSE, message=TRUE}
+##################################################################################################################
+#
+#  Reading in the Appswe model
+#
+##################################################################################################################
+gprDir = file.path(getwd(), "..") #VARDEFINITION
+analysisPath = file.path( getwd() ) #VARDEFINITION
+
+# galNRC5_01 = read.table("/media/Rstick/ADpaper/workspace/CustomMicroarrayPackage/data/NRC05_01.gal", sep="\t", header=TRUE, skip=56)
+# save( galNRC5_01, file="/media/Rstick/ADpaper/workspace/CustomMicroarrayPackage/data/galNRC5_01.rda"  )
+# load("/media/Rstick/ADpaper/workspace/CustomMicroarrayPackage/data/galNRC5_01.rda")
+
+
+data(chipAnnotDF,package="CustomMicroarrayPackage")
+data(galNRC5_01,package="CustomMicroarrayPackage")
+gridNameTable = galNRC5_01
+#connecting to annotation db
+db <- dbConnect(SQLite(), dbname=system.file("data/ncrna.chip2.annotation.db",package="CustomMicroarrayPackage"))
+#dbListTables(db)
+setwd(gprDir)
+
+#reading in chip data
+chipDataL <- readAndProcessChipData2_1( currDir=gprDir,GALFile = gridNameTable )
+
+RG = chipDataL$RG
+# RG = RG[which(!is.na(RG$genes$Block)),] would be to Remove NA Spots, but then the print tip loess is not working... therefore mark this spots as noSignal
+
+#Using the ID column for chip type and probe type modifications
+RG$genes$ID = ifelse( RG$genes$ID == "0","Cy3_Anchor-spot",RG$genes$ID )
+RG$genes$ID = ifelse( substr(RG$genes$ID,1,3) == "unk","unknown",RG$genes$ID )
+RG$genes$ID[which(is.na(RG$genes$Block))] = "unknown"
+
+#Initial Error -> 3.1 was changed to 03.Jän in the editor...
+RG$genes[RG$genes$ID == "e620",]$Name = "3.1"
+
+RG$genes = addProbeTypeAndChipTypeToRGGenes(RG=RG,dbcon=db,anchorName="Cy3_Anchor-spot",noSignal="unknown", refCol = "ID") # processing the chip
+
+message( paste0("All Oligos are present on the chip: ", dim(RG$genes[substr(x=RG$genes$ID, start=1, stop=1) == "e",] )[1]/ndups == 
+                  dim(galNRC5_01[substr(x=galNRC5_01$ID, start=1, stop=1) == "e",] )[1]/ndups ) )
+
+
+##########################################################
+#  Modify anything related to the RG file here
+##########################################################
+RG = extractNetIntensityValues(RG, deleteOther=TRUE)
+setwd(analysisPath)
+
+design = rep(c(1, -1), length(RG$targets[, 1])/2) 
+```
+
+```{r experimentSetting, echo=FALSE}
+RG$targets
+```
+
+```{r comparisonDirection, results='asis', echo=FALSE}
+cat(paste0( "<h2>Comparison is done by log(Cy5/Cy3), therefore the reference for the fold change is: <b>",RG$targets[1,2],"</b></h2>" ))
+```
+
+QualityControl Analysis before normalization
+-------------------------------------------------------------------
+### Print Tips of the chip with fitted Loess (Local Polynomial Regression Fitting) Curve
+```{r, fig.width=5, fig.height=5, fig.cap="Print Tip Loess Fit on the raw data",dpi = 144, echo=FALSE}
+plotPrintTipLoess( RG )
+```
+
+### Box Plot and Density Plot showing the green and red channel signal distributions
+```{r, fig.width=5, fig.height=5, fig.cap="Green and Red Channel Intensity Distribution",dpi = 144, echo=FALSE}
+plotBoxDensityFromRG(RG)
+```
+
+### MA Plot of each of the arrays on the Raw Data (M: $log(R)-log(G)$ versus A: $\frac{log2(R)+log2(G)}{2}$  values)
+```{r, fig.width=6, fig.height=6,dpi = 144, echo=FALSE,warning=FALSE}
+#creating a data.table for ggplot plotting
+plotMAofArrays( MA.RG(RG) )
+#    geom_smooth(aes(x = AveExpr, y = logFC), data=dat, method="loess")
+```
+
+### Array Quality Metrics generation before Normalization
+```{r}
+arrayQualityMetrics(expressionset = MA.RG(RG), outdir = "AQM_beforeNormalization", force = TRUE, do.logtransform = FALSE)
+```
+The file can be accessed here: 
+```{r  results='asis', echo=FALSE}
+cat("<a href=\"AQM_beforeNormalization/index.html\"> Quality Report before Normalization </a>")
+```
+
+Normalization on the raw data
+-------------------------------------------------------------------
+```{r}
+MA = normalizeTwoColorArray(RG, method=normMethod)
+```
+
+### MA Plot of each of the arrays Normalized Data (M: $log(R)-log(G)$ versus A: $\frac{log2(R)+log2(G)}{2}$  values)
+```{r, fig.width=6, fig.height=6,dpi = 144, echo=FALSE,warning=FALSE}
+#creating a data.table for ggplot plotting
+plotMAofArrays( MA )
+#    geom_smooth(aes(x = AveExpr, y = logFC), data=dat, method="loess")
+```
+
+### Box Plot and Density Plot showing the green and red channel signal distributions after normalization
+```{r, fig.width=5, fig.height=5, fig.cap="Green and Red Channel Intensity Distribution",dpi = 144, echo=FALSE}
+plotBoxDensityFromRG(RG.MA(MA))
+```
+
+### Array Quality Metrics generation after Normalization
+```{r}
+arrayQualityMetrics(expressionset = MA, outdir = "AQM_afterNormalization", force = TRUE, do.logtransform = FALSE)
+```
+The file can be accessed here: 
+```{r  results='asis', echo=FALSE}
+cat("<a href=\"AQM_afterNormalization/index.html\"> Quality Report after Normalization </a>")
+```
+
+Filtering of the data
+-------------------------------------------------------------------
+```{r}
+MAnonFilt = MA #backup variable
+MA = orderTwoColorArray(MA, by=orderingVar) #Ordering of MA by name 
+MA = filterSpotsBySpikeIn(MA=MA, normMethod=normMethod, subsetByManualControl = subsetByManualControl, subsetByPMvsMM = subsetByPMvsMM, ndups=ndups, spacing=spacing, writeLog=FALSE, design = design )
+```
+
+### MA Plot of each of the arrays on the Normalized and Filtered Data (M: $log(R)-log(G)$ versus A: $\frac{log2(R)+log2(G)}{2}$  values)
+```{r, fig.width=6, fig.height=6, dpi = 144, echo=FALSE,warning=FALSE}
+#creating a data.table for ggplot plotting
+plotMAofArrays( MA )
+```
+
+Differential Expression Analysis
+-------------------------------------------------------------------
+```{r}
+MA = orderTwoColorArray(MA, by=orderingVar)
+resL = performDiffExpAnalysis(MA, ndups = ndups, spacing=spacing )
+```
+
+```{r}
+tt = resL$ResultTable
+#Quering the database of the chip annotation for extra information
+additionalData = dbGetQuery(db, paste(
+"SELECT *  
+FROM oligoIDMapping oidm
+JOIN oligo o ON oidm.oligo_oligoTableID = o.oligoTableID
+JOIN secondary seco ON seco.secondaryTableID = o.secondary_secondaryTableID
+LEFT OUTER JOIN contig c ON c.contigTableID = oidm.contig_contigTableID
+LEFT OUTER JOIN annotationSummary ans ON ans.contigAnnotation_contig_contigTableID = c.contigTableID
+JOIN geneAnnot ga ON ga.contigAnnotation_contig_contigTableID = c.contigTableID
+LEFT OUTER JOIN predictionAdditional preda ON preda.oligo_oligoTableID = o.oligoTableID
+WHERE o.oligoTableID IN( ",paste(  sub("e","",tt$ID) , collapse=","),");",sep=""))
+
+#Adding this data to the Result Table
+additionalData$coordinates = paste0(additionalData$contigChromosome, ":", additionalData$contigStart, "-", additionalData$contigEnd)
+addData = additionalData[,c("oligoTableID","contigID","gc","length","microgram", "mp","ncRNABioType","ncRNAOrientation", "repeatName", 
+				"bindingEfficiency", "contigChromosome","geneRegion", "coordinates", "predictionProgram", "disease", "rsnumber", "gene","geneName","geneTranscriptID", "sequence")]
+addData$sequence = as.character( reverseComplement(DNAStringSet( addData$sequence ) ) )
+addData$oligoTableID = paste0("e",addData$oligoTableID)
+dat.tt = merge( tt, addData, by.x = "ID", by.y="oligoTableID", sort=FALSE )
+dat.tt$logPrev = -log10(dat.tt$P.Value)
+labelDF.tt = dat.tt[dat.tt$adj.P.Val < 0.05 ,]
+if(dim(labelDF.tt)[1] == 0){labelDF.tt = dat.tt[1:20,]; message("There is no significant candidate in the data, therefore the top 20 are displayed")}
+#Only in this case we want to display additional candidates: 
+if( length(addInterestCand) != 0){
+  labelDF.tt = rbind( labelDF.tt, dat.tt[ dat.tt$Name %in% addInterestCand, ] )
+  labelDF.tt = unique(labelDF.tt)
+}
+dat.tt$ncRNABioTypeSub = ifelse( dat.tt$ncRNABioType %in% c("miRNA","snoRNA","tRNA","piRNA","lincRNA"), dat.tt$ncRNABioType, "other" )
+dat.tt$Significance = 'p.value > 0.05 (BH)'
+if( dim( dat.tt[dat.tt$adj.P.Val < 0.05 ,])[1] != 0 ){
+  dat.tt[dat.tt$adj.P.Val < 0.05 ,]$Significance = 'p.value < 0.05 (BH)'  
+}
+
+#writing csv file
+fncsv = paste0("resultTable.csv")
+write.table(dat.tt,file=fncsv, sep="\t", col.names=TRUE, row.names=FALSE)
+```
+The ResultTable can be accessed here: 
+```{r  results='asis', echo=FALSE}
+cat(paste0("<a href=\"",fncsv,"\"> Differential Expression result (csv) </a>"))
+```
+
+### MA Plots of the resulting data (M: $log(R)-log(G)$ versus A: $\frac{log2(R)+log2(G)}{2}$ values)
+```{r, fig.width=7, fig.height=5, dpi = 144, echo=FALSE,warning=FALSE}
+g1 = ggplot( dat.tt, aes(x=AveExpr, y=logFC), environment=environment() ) + geom_point(colour="lightgrey") + 
+  labs(title="MAPlot (Averaged over all arrays)", x="Intensity (A)", y="log2 Fold Change (M)") +
+  geom_text( data = labelDF.tt, aes( x= AveExpr, y=logFC, label=Name), show_guide = FALSE, size=2, color="red") +
+  geom_hline( aes(yintercept=-minDetectLim, linetype="dashed"), show_guide = FALSE ) +
+  geom_hline( aes(yintercept=minDetectLim, linetype="dashed"), show_guide = FALSE )
+g1
+```
+```{r, fig.width=8, fig.height=5, dpi = 144, echo=FALSE,warning=FALSE}
+g2 =  ggplot( dat.tt, aes(x=AveExpr, y=logFC, colour = ncRNABioTypeSub), environment=environment() ) + geom_point() + 
+  labs(title="MAPlot (Averaged over all arrays)", x="Intensity (A)", y="log2 Fold Change (M)") +
+  geom_text( data = labelDF.tt, aes( x= AveExpr, y=logFC, label=Name), show_guide = FALSE, size=2, color="black") +
+  geom_hline( aes(yintercept=-minDetectLim, linetype="dashed"), show_guide = FALSE ) +
+  geom_hline( aes(yintercept=minDetectLim, linetype="dashed"), show_guide = FALSE )
+g2
+```
+
+### Vulcano Plot of the resulting Data
+```{r, fig.width=7, fig.height=7, dpi = 144, echo=FALSE,warning=FALSE}
+g = ggplot( dat.tt, aes(x=logFC, y=logPrev, colour = Significance), environment=environment() ) + geom_point() + scale_color_manual(values=c( "red","lightgrey")) + 
+  labs(title="Vulcano Plot (Averaged over all arrays)", x="log2 Fold Change (M)", y="-log10(p-value)") + 
+  geom_text( data = labelDF.tt, aes( x= logFC, y=logPrev, label=Name), show_guide = FALSE, size=2, color="black") #-0.07
+g
+```
+
+### Table Showing the top candidates
+````{r topTable, results='asis', echo=FALSE}
+tablegvis = labelDF.tt[,c("ID","Name","contigID","probe.type","chipType","logFC", "AveExpr","t","P.Value","adj.P.Val","B","ncRNABioType","ncRNAOrientation","geneName")]
+plot(createGVisTableFromDF(tablegvis))
+```
+
+### Fold Change by condition, of top five differentially expressed candidates
+````{r}
+#Creating an Expression set
+#Creating an Expression set
+minAnnot = unique(dat.tt[,c("Block", "Row","Column","ID","Name","probe.type","chipType","logFC", "AveExpr","ncRNABioTypeSub")]) #Since due to left out join, there could be some entries duplicated whereby only one attributes differe (disease for example is a one to many relation)
+MAave = avedups( MA, ndups=ndups, spacing=spacing )
+featAnnot = merge( MAave$genes,  minAnnot, by=colnames(MAave$genes), sort=FALSE)
+exprsData = MAave$M
+rownames(exprsData) = featAnnot$Name
+rownames( MAave$targets ) = sub(".*-","", sub("\\.gpr","",rownames( MAave$targets )))
+sampleType = paste( rownames( MAave$targets)  ,MAave$targets$Cy5, sep="_") #sample type always needs to be inspected
+
+colnames(exprsData) = rownames(MAave$targets)
+rownames(featAnnot) = featAnnot$Name
+
+eSet = ExpressionSet(exprsData, phenoData= AnnotatedDataFrame(MAave$targets), featureData = AnnotatedDataFrame(featAnnot), annotation="customAnnot")
+eSet$SampleType = as.factor(sampleType)
+```
+
+```{r fig.width=5, fig.height=5, dpi = 144}
+discr = as.factor(sub( ".*_","", eSet$SampleType))
+rocs = rowpAUCs(eSet, discr,  p=0.2) #calculates the area under the curve
+
+top5Cand = which(names(genefilter::area(rocs)) %in% unique(c(dat.tt[1:5,"Name"],addInterestCand)))
+
+for( j in top5Cand  ){
+  y = exprs(eSet[j,])
+  ord=order(discr)
+  featureName = featureNames(eSet[j,])
+  par(mfrow=c(1,2))
+  genefilter::plot(rocs[j], main=featureName)
+  plot( y[ord], pch=c(1,16)[discr[ord]], col=c("black","red")[discr[ord]], main=featureName, ylab=expression(log[2]~intensity), xlab="samples" )
+  text( x=1:24, y=y[ord]+0.01, labels=phenoData(eSet)$Sample[ord], cex = 0.4 )  
+}
+
+```
+
+Interactive Plots (Javascript needs to be enabled)
+-------------------------------------------------------------------
+
+### Interactive MA Plot
+````{r echo=FALSE, results='asis' }
+dataToPlot = dat.tt
+colnames(dataToPlot)[ which(colnames(dataToPlot) == "P.Value") ] = "PValue"
+colnames(dataToPlot)[ which(colnames(dataToPlot) == "adj.P.Val") ] = "adjPValue"
+
+dataToPlot = dataToPlot[,c("ID", "Name", "chipType", "logFC", 
+                           "AveExpr", "PValue", "adjPValue", "ncRNABioType", "geneRegion", "coordinates", "predictionProgram"
+                           , "disease", "rsnumber", "gene", "geneName", "geneTranscriptID")]
+n2 = nPlot( logFC ~ AveExpr, data=dataToPlot, type='scatterChart', group='chipType' )
+n2$chart(tooltipContent= "#! function(key, x, y, e){
+  return '<b>Name: </b> ' + e.point.Name + '<br/>' + 
+         '<b>PValue: </b> ' + e.point.PValue + '<br/>' + 
+         '<b>adjPValue: </b> ' + e.point.adjPValue + '<br/>' + 
+         '<b>ncRNABioType: </b> ' + e.point.ncRNABioType + '<br/>' + 
+         '<b>geneRegion: </b> ' + e.point.geneRegion + '<br/>' + 
+          '<b>geneName: </b> ' + e.point.geneName + '<br/>' + 
+          '<b>geneTranscriptID: </b> ' + e.point.geneTranscriptID + '<br/>' + 
+         '<b>gene: </b> ' + e.point.gene + '<br/>' + 
+          '<b>coordinates: </b> ' + e.point.coordinates + '<br/>' + 
+          '<b>predictionProgram: </b> ' + e.point.predictionProgram + '<br/>' + 
+         '<b>disease: </b> ' + e.point.disease + '<br/>' + 
+         '<b>rsnumber: </b> ' + e.point.rsnumber + '<br/>' + 
+         '<b>coordinates: </b>' + e.point.coordinates
+} !#")
+n2$print("chart1")
+
+```
+
+Additional Information: Size Distribution of non-coding RNA contigs on the microarray
+----------------------------------------------------------------------
+
+```{r echo=FALSE, warning=FALSE, message=FALSE, results = 'asis'}
+sizeData = dbGetQuery(db, 
+"SELECT * FROM oligoIDMapping oidm 
+JOIN oligo o ON o.oligoTableID = oidm.oligo_oligoTableID
+JOIN contig c ON c.contigTableID = oidm.contig_contigTableID
+JOIN annotationSummary annots ON annots.contigAnnotation_contig_contigTableID = c.contigTableID" )
+
+#binning the contigSize Data
+#bins of 5 till 100 , then everything in one bin
+#first remove all contigs < 18
+sizeData = sizeData[sizeData$contigLength > 18,]
+sizeData = sizeData[sizeData$category == "PM",]
+binningContigLength = function( data, varToBin, binsFrom=18,binsTo=100,binsBy=5 ){
+ 
+  bins = seq(binsFrom,binsTo, by=binsBy)
+  lowerBin = bins
+  upperBin = bins + 5
+  upperBin[length(upperBin)] = max(sizeData$contigLength)+1
+  
+  contigBin = rep("", dim(data)[1])
+  
+  for(i in c(1:length(upperBin))  ){
+    contigBin[which( data$contigLength < upperBin[i] & data$contigLength >= lowerBin[i])] = paste0(lowerBin[i],"-",upperBin[i]-1)
+  }
+  return(contigBin)
+}
+
+contigBins = binningContigLength(sizeData)
+sizeData$contigBins = contigBins
+
+contL = split(sizeData, f=as.factor(sizeData$contigID)  )
+contigOligoCoverage = unlist(lapply( contL, function(x){return(dim(x)[1])} ))
+rm(contL)
+contigData = sizeData
+contigData = contigData[!duplicated(contigData$contigID),]
+contigData$contigOligoCoverage = contigOligoCoverage
+
+contigData = contigData[,c("contigBins","ncRNABioType","contigOligoCoverage")]
+contigData$contigOligoCoverage = as.character(contigData$contigOligoCoverage)
+contigData[ !(contigData$ncRNABioType %in% c("miRNA","piRNA","snoRNA","tRNA","rRNA","lincRNA")),]$ncRNABioType = "other"
+
+contigData[,3] = as.numeric(contigData[,3])
+contigBins = melt( table(contigData[,1:2]) )
+
+contigData_new = data.frame( "binBio"=paste0(contigData$contigBins,"_",contigData$ncRNABioType), "OligoCov"=contigData[,3] )
+
+for( binbio in unique(contigData_new$binBio)  ){
+    occ = which(contigData_new$binBio == binbio)
+    summedVal = sum( contigData_new[occ,"OligoCov"] )
+    contigData_new[occ,]$OligoCov = summedVal
+}
+contigData_new = contigData_new[!duplicated(contigData_new$binBio),]
+oligoCoverageByBin = data.frame( "contigBins"=sub("_.*","",contigData_new$binBio), 
+                                 "ncRNABioType"=sub(".*_","",contigData_new$binBio),
+                                 "OligoCoverage"=contigData_new$OligoCov  )
+
+contigBins= merge( contigBins, oligoCoverageByBin, by=c("contigBins","ncRNABioType"), all.x=TRUE )
+contigBins$OligoCoverage = ifelse(is.na(contigBins$OligoCoverage), 0, contigBins$OligoCoverage)
+colnames(contigBins) = c("contigBins", "ncRNABioType", "Freq", "OligoCoverage")
+n1 = nPlot( Freq~contigBins, data = contigBins,group="ncRNABioType", type="multiBarChart" )
+
+n1$chart(tooltipContent= "#! function(key, x, y, e){
+  return '<b>Contig Bin: </b> ' + e.point.contigBins + '<br/>' + 
+         '<b>ncRNA Biotype: </b> ' + e.point.ncRNABioType + '<br/>' + 
+         '<b>Contigs in Bin: </b> ' + e.point.Freq + '<br/>' + 
+         '<b>OligoCoverage: </b> ' + e.point.OligoCoverage
+} !#")
+
+n1$print("chart2")
+```
+
+````{r}
+save.image(file="session.rda")
+```
+
+Additional Information for reproducibility 
+----------------------------------------------------------------------
+### R package versions
+````{r}
+sessionInfo()
+```
+
+````{r, echo=TRUE}
+# analysisTemplate2.1 = readLines("/media/Rstick/ADpaper/workspace/CustomMicroarrayPackage/src/AnalysisTemplate2_1.Rmd")
+# save(analysisTemplate2.1, file="/media/Rstick/ADpaper/workspace/CustomMicroarrayPackage/data/analysisTemplate2.1.rda")
+```
+
