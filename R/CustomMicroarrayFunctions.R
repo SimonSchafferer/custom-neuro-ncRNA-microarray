@@ -12,7 +12,7 @@ loadLibraryAs = function( name, filename, envir=globalenv() ){
   return(name)
 }
 
-#' Calculates the mean or median value of the spots on a chip by a given Identifier
+#' Calculates the mean or median value of the spots on a chip by a given Identifier (deprecated)
 #' @param x An object of type EListRaw, RGList or EList
 #' @param byType An identifier that is used for grouping the values e.g. ID
 #' @param method The method name as character for spot averaging (currently 'mean' and 'median' are supported) this will then call colMeans or colMedians
